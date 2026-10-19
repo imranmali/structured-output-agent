@@ -1,0 +1,20 @@
+# See https://pre-commit.com for usage. Install the hooks with:
+#   pip install pre-commit && pre-commit install
+# Keep the ruff rev roughly in step with the version CI resolves from the `dev` extra.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.1
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
