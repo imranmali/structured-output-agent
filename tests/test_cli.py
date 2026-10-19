@@ -48,9 +48,7 @@ def test_schema_command(capsys: pytest.CaptureFixture[str]) -> None:
         ("not_a_module_xyz:Thing", "not_a_module_xyz"),
     ],
 )
-def test_schema_command_errors(
-    spec: str, message: str, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_schema_command_errors(spec: str, message: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["schema", spec]) == 1
     assert message in capsys.readouterr().err
 
