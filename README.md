@@ -101,7 +101,7 @@ from structured_output_agent import extract_json, parse_output
 
 extract_json('Sure! Here it is: {"a": 1} Hope that helps.')  # {'a': 1}
 parse_output('{"age": "old"}', OutputContract(Person))
-# SchemaValidationError: name: Field required; age: Input should be a valid integer...
+# raises SchemaValidationError: 2 validation errors for Person: name: Field required; age: ...
 ```
 
 ### Retry on parse and validation errors
