@@ -42,8 +42,7 @@ Requires Python 3.10+. The only runtime dependency is `pydantic>=2`.
 ```python
 from pydantic import BaseModel
 
-from structured_output_agent import AnthropicClient
-from structured_output_agent.agent import StructuredOutputAgent
+from structured_output_agent import AnthropicClient, StructuredOutputAgent
 
 
 class Person(BaseModel):
@@ -83,7 +82,7 @@ structured-agent demo
 prompt. Strict mode rejects fields the schema does not declare:
 
 ```python
-from structured_output_agent.schema import OutputContract
+from structured_output_agent import OutputContract
 
 contract = OutputContract(Person, strict=True)
 contract.json_schema()["additionalProperties"]  # False
@@ -98,7 +97,7 @@ agent = StructuredOutputAgent(llm, strict=True)  # or agent.run(..., strict=True
 prose. Validation is always strict Pydantic validation, and errors are itemised:
 
 ```python
-from structured_output_agent.parsing import extract_json, parse_output
+from structured_output_agent import extract_json, parse_output
 
 extract_json('Sure! Here it is: {"a": 1} Hope that helps.')  # {'a': 1}
 parse_output('{"age": "old"}', OutputContract(Person))
@@ -108,7 +107,7 @@ parse_output('{"age": "old"}', OutputContract(Person))
 ### Retry on parse and validation errors
 
 ```python
-from structured_output_agent.retry import RetryPolicy
+from structured_output_agent import RetryPolicy
 
 agent = StructuredOutputAgent(
     llm,
@@ -125,7 +124,7 @@ by a repair request listing each error (`loc: msg`). When every attempt fails,
 ```python
 from pydantic import BaseModel
 
-from structured_output_agent.tools import ToolRegistry
+from structured_output_agent import ToolRegistry
 
 
 class Weather(BaseModel):
@@ -153,7 +152,7 @@ returned to the model as error results, so it can recover, and are logged.
 ### Validation failure logging
 
 ```python
-from structured_output_agent.validation_log import ValidationLogger
+from structured_output_agent import ValidationLogger
 
 logger = ValidationLogger(path="logs/failures.jsonl", max_raw_chars=2000)
 agent = StructuredOutputAgent(llm, logger=logger)
