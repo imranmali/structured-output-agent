@@ -10,7 +10,8 @@ EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
 def load(name: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(f"example_{name}", EXAMPLES / f"{name}.py")
-    assert spec is not None and spec.loader is not None
+    assert spec is not None
+    assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)

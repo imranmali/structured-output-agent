@@ -27,6 +27,7 @@ from .errors import (
     ToolResponseError,
     UnknownToolError,
 )
+from .parsing import errors_from_pydantic
 from .types import ErrorDetail, ToolCall, ToolSpec
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -213,7 +214,7 @@ class ToolRegistry:
         try:
             validated = tool.args_model.model_validate(call.arguments)
         except ValidationError as exc:
-            errors = _errors_from_pydantic(exc)
+            errors = errors_from_pydantic(exc)
             return _failure(
                 call,
                 ToolArgumentError(
@@ -250,7 +251,7 @@ def _serialise_response(tool: Tool, returned: Any) -> tuple[Any, str]:
         try:
             model = tool.response_model.model_validate(returned)
         except ValidationError as exc:
-            errors = _errors_from_pydantic(exc)
+            errors = errors_from_pydantic(exc)
             raise ToolResponseError(
                 f"Tool '{tool.name}' returned an invalid response: {_summary(errors)}",
                 tool_name=tool.name,
@@ -282,18 +283,6 @@ def _failure(call: ToolCall, error: ToolError) -> ToolResult:
         error=error,
         arguments=call.arguments,
     )
-
-
-def _errors_from_pydantic(exc: ValidationError) -> list[ErrorDetail]:
-    return [
-        ErrorDetail(
-            loc=".".join(str(part) for part in error["loc"]) or "$",
-            msg=error["msg"],
-            type=error["type"],
-            input=error.get("input"),
-        )
-        for error in exc.errors()
-    ]
 
 
 def _summary(errors: list[ErrorDetail]) -> str:

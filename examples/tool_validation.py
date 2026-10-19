@@ -37,8 +37,8 @@ def get_quote(symbol: str) -> dict[str, object]:
 
 
 SCRIPTED = [
-    LLMResponse(text="", tool_calls=[ToolCall(id="1", name="get_quote", arguments={"ticker": "acme"})]),
-    LLMResponse(text="", tool_calls=[ToolCall(id="2", name="get_quote", arguments={"symbol": "acme"})]),
+    LLMResponse(text="", tool_calls=[ToolCall("1", "get_quote", {"ticker": "acme"})]),
+    LLMResponse(text="", tool_calls=[ToolCall("2", "get_quote", {"symbol": "acme"})]),
     '{"symbol": "ACME", "action": "hold", "reason": "Price is stable at 187.20 USD."}',
 ]
 

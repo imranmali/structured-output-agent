@@ -65,19 +65,14 @@ def demo_llm() -> ScriptedLLM:
             # Missing and mistyped fields -> validation error.
             '{"city": "Paris", "temperature_c": "warm"}',
             # Tool call with the wrong argument name -> rejected before execution.
-            LLMResponse(
-                text="", tool_calls=[ToolCall(id="c1", name="get_weather", arguments={"town": "Paris"})]
-            ),
+            LLMResponse(text="", tool_calls=[ToolCall("c1", "get_weather", {"town": "Paris"})]),
             # Corrected tool call -> executed, response validated.
-            LLMResponse(
-                text="", tool_calls=[ToolCall(id="c2", name="get_weather", arguments={"city": "Paris"})]
-            ),
+            LLMResponse(text="", tool_calls=[ToolCall("c2", "get_weather", {"city": "Paris"})]),
             # Fenced but valid JSON -> success.
             '```json\n{"city": "Paris", "temperature_c": 18.5, "conditions": "light rain", '
             '"advice": "Take an umbrella."}\n```',
             # Run 2: valid on the first attempt.
-            '{"city": "Oslo", "temperature_c": -3, "conditions": "snow", '
-            '"advice": "Wear boots."}',
+            '{"city": "Oslo", "temperature_c": -3, "conditions": "snow", "advice": "Wear boots."}',
         ]
     )
 
