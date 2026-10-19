@@ -28,8 +28,8 @@
 
 ## 6. CI/CD (`ci/github-actions`)
 
-- [ ] 6.1 Add `.github/workflows/ci.yml` (lint, format, mypy, test matrix with coverage gate, OpenSpec validation, build, Docker build) and verify it passes on the pull request
-- [ ] 6.2 Add `.github/workflows/cd.yml`, `Dockerfile` and `.dockerignore` and verify the Docker image builds and runs `structured-agent demo` locally or in CI
+- [x] 6.1 Add `.github/workflows/ci.yml` (lint, format, mypy, test matrix with coverage gate, OpenSpec validation, build, Docker build) and verify it passes on the pull request
+- [x] 6.2 Add `.github/workflows/cd.yml`, `Dockerfile` and `.dockerignore` and verify the Docker image builds and runs `structured-agent demo` locally or in CI
 
 ## 7. Documentation and licensing
 
