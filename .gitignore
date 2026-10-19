@@ -25,3 +25,6 @@ logs/
 .idea/
 .vscode/
 .DS_Store
+
+# Agent worktrees
+.claude/worktrees/

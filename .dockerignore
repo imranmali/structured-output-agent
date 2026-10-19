@@ -1,0 +1,31 @@
+# VCS and editor / agent tooling
+.git
+.gitignore
+.github
+.claude
+.idea
+.vscode
+.DS_Store
+
+# Virtualenvs and caches
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+coverage.xml
+htmlcov
+*.egg-info
+
+# Build outputs
+dist
+build
+
+# Not needed in the image
+tests
+openspec
+logs
+*.jsonl
