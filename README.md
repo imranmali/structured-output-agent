@@ -53,7 +53,7 @@ class Person(BaseModel):
 agent = StructuredOutputAgent(AnthropicClient())  # uses ANTHROPIC_API_KEY
 result = agent.run("Ada Lovelace was 36 when she died.", Person)
 
-print(result.output)    # name='Ada Lovelace' age=36
+print(result.output)  # name='Ada Lovelace' age=36
 print(result.attempts)  # 1, or more if the model needed repairing
 ```
 
@@ -64,8 +64,8 @@ from structured_output_agent import ScriptedLLM
 
 llm = ScriptedLLM(['{"name": "Ada"}', '{"name": "Ada", "age": 36}'])
 result = StructuredOutputAgent(llm).run("Ada is 36", Person)
-assert result.attempts == 2               # first answer was missing "age"
-print(result.failures[0].errors[0])       # age: Field required
+assert result.attempts == 2  # first answer was missing "age"
+print(result.failures[0].errors[0])  # age: Field required
 ```
 
 Try the offline demo:
@@ -86,7 +86,7 @@ from structured_output_agent import OutputContract
 
 contract = OutputContract(Person, strict=True)
 contract.json_schema()["additionalProperties"]  # False
-contract.system_prompt("You extract people.")    # your text + schema instructions
+contract.system_prompt("You extract people.")  # your text + schema instructions
 
 agent = StructuredOutputAgent(llm, strict=True)  # or agent.run(..., strict=True)
 ```
@@ -157,8 +157,8 @@ from structured_output_agent import ValidationLogger
 logger = ValidationLogger(path="logs/failures.jsonl", max_raw_chars=2000)
 agent = StructuredOutputAgent(llm, logger=logger)
 ...
-logger.events          # list[FailureEvent]
-logger.stats.to_dict() # runs, successes, attempts, failures_by_kind, success rates
+logger.events  # list[FailureEvent]
+logger.stats.to_dict()  # runs, successes, attempts, failures_by_kind, success rates
 ```
 
 Each failure is also emitted on the `structured_output_agent` logger (warning),
@@ -183,8 +183,7 @@ from structured_output_agent import LLMResponse, Message, ToolSpec
 class MyClient:
     def complete(
         self, *, system: str, messages: Sequence[Message], tools: Sequence[ToolSpec] = ()
-    ) -> LLMResponse:
-        ...
+    ) -> LLMResponse: ...
 ```
 
 `AnthropicClient` defaults to `claude-opus-5-5`, replays assistant turns with
