@@ -5,6 +5,7 @@ Subcommands:
 * ``demo``   - offline walkthrough with a scripted model that makes mistakes.
 * ``schema`` - print the JSON Schema the model is shown for a Pydantic model.
 * ``run``    - run a prompt against Claude and print the validated JSON.
+* ``serve``  - serve the HTTP API (needs the ``server`` extra).
 """
 
 from __future__ import annotations
@@ -140,6 +141,26 @@ def cmd_run(args: argparse.Namespace, out: TextIO, llm: LLMClient | None = None)
     return 0
 
 
+def _port(value: str) -> int:
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"port must be between 1 and 65535, got {port}")
+    return port
+
+
+def cmd_serve(args: argparse.Namespace, out: TextIO) -> int:
+    """Serve the HTTP API until stopped; configuration comes from ``SOA_*`` variables."""
+    try:
+        from .server.runner import run as run_server
+    except ImportError as exc:
+        raise ImportError(
+            "the serve command needs the 'server' extra: "
+            "pip install 'structured-output-agent[server]'"
+        ) from exc
+    run_server(host=args.host, port=args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="structured-agent",
@@ -165,6 +186,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--strict", action="store_true", help="forbid unknown fields")
     run.add_argument("--log-file", help="append failure events to this JSONL file")
     run.set_defaults(func=cmd_run)
+
+    serve = sub.add_parser(
+        "serve", help="serve the HTTP API (needs the server extra; configured by SOA_* variables)"
+    )
+    serve.add_argument("--host", default="0.0.0.0", help="interface to bind (default 0.0.0.0)")
+    serve.add_argument("--port", type=_port, default=8000, help="port to bind (default 8000)")
+    serve.set_defaults(func=cmd_serve)
     return parser
 
 
