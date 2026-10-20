@@ -25,7 +25,7 @@
 
 ## 5. CI/CD and supply chain (`ci/production-hardening`)
 
-- [ ] 5.1 Extend CI with Python 3.14, all extras, `pip-audit`, CodeQL, container scan and a service smoke test, and verify the workflows pass `actionlint` and run green on the pull request
+- [x] 5.1 Extend CI with Python 3.14, all extras, `pip-audit`, CodeQL, container scan and a service smoke test, and verify the workflows pass `actionlint` and run green on the pull request
 - [x] 5.2 Extend CD with multi-arch images, SBOM/provenance and optional PyPI trusted publishing, and verify `actionlint` passes
 - [x] 5.3 Add SECURITY.md and CHANGELOG.md and update CONTRIBUTING.md, and verify links resolve
 
