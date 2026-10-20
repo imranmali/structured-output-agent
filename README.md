@@ -348,7 +348,7 @@ openspec/            specs and change history (OpenSpec)
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install -e '.[dev]'
+pip install -e '.[dev,server,anthropic]'
 
 ruff check . && ruff format --check .
 mypy
