@@ -210,7 +210,7 @@ import asyncio
 
 from structured_output_agent import AsyncScriptedLLM, AsyncStructuredOutputAgent, RunResult
 
-llm = AsyncScriptedLLM(['{"name": "Ada", "age": 36}'] * 3, delay=0.05)
+llm = AsyncScriptedLLM(['{"name": "Ada", "age": 36}'] * 4, delay=0.05)
 agent = AsyncStructuredOutputAgent(llm, run_timeout=30)
 
 
