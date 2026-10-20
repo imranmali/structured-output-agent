@@ -155,7 +155,7 @@ def cmd_serve(args: argparse.Namespace, out: TextIO) -> int:
     except ImportError as exc:
         raise ImportError(
             "the serve command needs the 'server' extra: "
-            f"pip install 'structured-output-agent[server]' ({exc})"
+            "pip install 'structured-output-agent[server]'"
         ) from exc
     run_server(host=args.host, port=args.port)
     return 0
