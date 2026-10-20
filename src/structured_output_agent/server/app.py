@@ -10,6 +10,7 @@ from __future__ import annotations
 import hmac
 import logging
 import math
+import os
 import re
 import time
 import uuid
@@ -537,6 +538,10 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         state.shutting_down = False
         log.info("service started with models: %s", ", ".join(sorted(state.models)) or "none")
+        if llm is None and llm_factory is None and not _anthropic_credentials():
+            log.warning(
+                "ANTHROPIC_API_KEY is not set; runs will fail until credentials are provided"
+            )
         try:
             yield
         finally:
@@ -677,6 +682,10 @@ def create_app(
         return Response(generate_latest(state.registry), media_type=CONTENT_TYPE_LATEST)
 
     return app
+
+
+def _anthropic_credentials() -> bool:
+    return any(os.environ.get(name) for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"))
 
 
 def _retry_counter(state: ServiceState) -> Callable[[int, BaseException, float], None]:

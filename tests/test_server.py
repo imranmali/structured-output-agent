@@ -674,6 +674,19 @@ async def test_default_llm_factory_wraps_anthropic_client_lazily(
     assert state.llm.policy.max_retries == 2
 
 
+@pytest.mark.parametrize(("key", "warned"), [("", True), ("sk-test", False)])
+async def test_startup_warns_when_credentials_are_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, key: str, warned: bool
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", key)
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+    app = create_app(ServerSettings(), models={"Invoice": Invoice})
+    with caplog.at_level(logging.WARNING):
+        async with app.router.lifespan_context(app):
+            pass
+    assert ("ANTHROPIC_API_KEY is not set" in caplog.text) is warned
+
+
 def test_default_llm_factory_builds_real_clients() -> None:
     import structured_output_agent.resilience as resilience
 
