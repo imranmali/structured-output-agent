@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: structured-output-agent
+  labels:
+    app.kubernetes.io/name: structured-output-agent
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: structured-output-agent
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

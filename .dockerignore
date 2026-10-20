@@ -29,3 +29,11 @@ tests
 openspec
 logs
 *.jsonl
+deploy
+docs
+examples
+
+# Never send local secrets to the build context
+.env
+.env.*
+*.env

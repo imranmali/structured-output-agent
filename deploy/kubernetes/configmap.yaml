@@ -1,0 +1,33 @@
+# Non-secret service configuration. Every variable is documented in
+# docs/deployment.md ("Configuration reference"). Empty values keep defaults.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: structured-output-agent
+  labels:
+    app.kubernetes.io/name: structured-output-agent
+    app.kubernetes.io/component: api
+data:
+  # Output contracts to serve (comma-separated module:Class). Replace the demo
+  # contract with your own models, installed into the image.
+  SOA_MODELS: "structured_output_agent.cli:WeatherReport"
+  # Optional ToolRegistry, as module:attribute.
+  SOA_TOOLS: ""
+  SOA_LLM_MODEL: "claude-opus-5-5"
+  SOA_LLM_TIMEOUT: "120"
+  SOA_PROVIDER_RETRIES: "3"
+  SOA_MAX_ATTEMPTS: "3"
+  SOA_RUN_TIMEOUT: "300"
+  # Runs in flight per pod before requests are shed with 503.
+  SOA_MAX_IN_FLIGHT: "32"
+  SOA_MAX_PROMPT_CHARS: "100000"
+  SOA_MAX_BATCH: "50"
+  SOA_BATCH_CONCURRENCY: "8"
+  SOA_STRICT: "false"
+  SOA_LOG_FORMAT: "json"
+  SOA_LOG_LEVEL: "INFO"
+  SOA_REDACT_EMAILS: "true"
+  SOA_MAX_EVENTS: "1000"
+  # Optional JSONL failure log; /tmp is the only writable path in the pod and
+  # is ephemeral, so ship it with a log agent if you enable this.
+  SOA_FAILURE_LOG: ""

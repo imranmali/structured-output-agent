@@ -28,6 +28,7 @@ openspec validate --all --strict
 
 - [ ] Tests added or updated for new behaviour (coverage stays at or above 90%)
 - [ ] Docs updated (README, docstrings, OpenSpec artifacts) where behaviour changed
+- [ ] `CHANGELOG.md` updated under `## [Unreleased]` for user-visible changes
 - [ ] `openspec validate --all --strict` passes
 - [ ] Commits follow [Conventional Commits](https://www.conventionalcommits.org/)
 - [ ] Completed tasks are ticked in the change's `tasks.md`
