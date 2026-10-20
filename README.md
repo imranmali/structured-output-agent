@@ -304,7 +304,49 @@ the text is replaced with `[REDACTION FAILED]` rather than leaked.
 
 ## HTTP service
 
-SERVICE_PLACEHOLDER
+`structured-agent serve` (or the container image, which serves by default)
+exposes your Pydantic models over HTTP as a stateless service that scales by
+adding replicas:
+
+```bash
+docker run --rm -p 8000:8000 \
+  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e SOA_API_KEYS="$(openssl rand -hex 32)" \
+  -e SOA_MODELS=structured_output_agent.cli:WeatherReport \
+  ghcr.io/imranmali/structured-output-agent:latest
+
+curl -sS localhost:8000/v1/runs -H "Authorization: Bearer $SOA_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model": "WeatherReport", "prompt": "Weather report for Paris"}'
+```
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /v1/runs` | one run: validated `output`, `run_id`, `attempts`, `failures`, `usage`, `duration_ms` |
+| `POST /v1/batches` | many prompts for one contract, bounded concurrency, results in order |
+| `GET /v1/models`, `GET /v1/models/{name}` | served contracts and their JSON Schemas |
+| `GET /healthz`, `GET /readyz` | liveness and readiness probes (never authenticated) |
+| `GET /metrics` | Prometheus metrics: runs, attempts, failures by kind, latency, tokens, in-flight |
+
+Production behaviour:
+
+- **Errors mapped to status codes:** 401 auth, 404 unknown contract, 422 invalid
+  request or retries exhausted (with the failure history), 502 provider error,
+  503 overloaded (with `Retry-After`), 504 run timeout.
+- **Load shedding:** each replica caps in-flight runs (`SOA_MAX_IN_FLIGHT`) and
+  sheds excess load immediately instead of queueing it; the HPA adds replicas.
+- **Credentials:** API keys (`SOA_API_KEYS`) are compared in constant time, and
+  the LLM client is created lazily so probes work before credentials resolve.
+- **Logs:** JSON logs carry request IDs. Prompts and outputs are never logged,
+  and emails are redacted from the failure log.
+- **Shutdown:** readiness fails during shutdown so in-flight requests drain.
+
+Deployment assets: [`deploy/kubernetes/`](deploy/kubernetes) (Deployment with
+hardened security context, Service, HPA, PDB, ConfigMap; `kubectl apply -k
+deploy/kubernetes`) and [`deploy/docker-compose.yml`](deploy/docker-compose.yml)
+(with optional Prometheus). The configuration reference, API reference,
+scaling guidance and operations runbook are in
+[docs/deployment.md](docs/deployment.md).
 
 ## CLI
 
@@ -312,9 +354,10 @@ SERVICE_PLACEHOLDER
 structured-agent demo [--log-file failures.jsonl]     # offline walkthrough
 structured-agent schema mypkg.models:Person --strict  # print the JSON Schema
 structured-agent run mypkg.models:Person "Ada is 36"  # call Claude (anthropic extra)
+structured-agent serve --host 0.0.0.0 --port 8000     # HTTP service (server extra)
 ```
 
-The Docker image runs the same CLI:
+The Docker image runs the same CLI and serves the API by default:
 
 ```bash
 docker run --rm ghcr.io/imranmali/structured-output-agent:latest demo
@@ -333,14 +376,21 @@ docker run --rm ghcr.io/imranmali/structured-output-agent:latest demo
 src/structured_output_agent/
   types.py           shared dataclasses (Message, ToolCall, ErrorDetail, RunResult, ...)
   errors.py          exception hierarchy
-  llm.py             LLMClient protocol, ScriptedLLM, AnthropicClient
+  llm.py             LLMClient/AsyncLLMClient protocols, scripted and Anthropic clients
+  resilience.py      ProviderRetryPolicy, RetryingLLM, AsyncRetryingLLM
   schema.py          OutputContract: JSON Schema, prompt, strict validation
   parsing.py         JSON extraction and itemised validation errors
   retry.py           RetryPolicy and repair prompts
   tools.py           ToolRegistry with argument and response validation
-  validation_log.py  failure events, JSONL sink, reliability stats
-  agent.py           StructuredOutputAgent loop
+  validation_log.py  failure events (bounded, redacted), JSONL sink, reliability stats
+  engine.py          sans-IO RunEngine shared by both agents
+  agent.py           StructuredOutputAgent and AsyncStructuredOutputAgent
+  hooks.py           RunHooks lifecycle notifications
+  loading.py         module:attr loader
   cli.py             structured-agent CLI
+  server/            FastAPI service: settings, app, metrics, logging, runner
+deploy/              Kubernetes manifests, docker-compose, Prometheus config
+docs/deployment.md   configuration, API, scaling and operations guide
 openspec/            specs and change history (OpenSpec)
 ```
 
@@ -365,12 +415,19 @@ and release process.
 ## CI/CD
 
 - **CI** (`.github/workflows/ci.yml`, every PR and push to `main`): ruff lint and
-  format check, mypy strict, pytest on Python 3.10–3.13 with a 90% coverage gate,
-  `openspec validate --all --strict`, wheel/sdist build with an installed smoke
-  test, and a Docker build that runs the demo.
-- **CD** (`.github/workflows/cd.yml`): pushes to `main` publish a container image
-  to GHCR; `vX.Y.Z` tags also build the distributions and attach them to a GitHub
-  Release.
+  format check, mypy strict, pytest on Python 3.10–3.14 with all extras and a
+  90% coverage gate, `openspec validate --all --strict`, `pip-audit`, wheel/sdist
+  build with an installed smoke test, and a Docker build that runs the demo,
+  smoke-tests the HTTP service and scans the image with Trivy.
+- **CodeQL** (`.github/workflows/codeql.yml`): Python and workflow analysis on
+  PRs, `main` and weekly.
+- **CD** (`.github/workflows/cd.yml`): pushes to `main` publish a multi-arch
+  (amd64/arm64) image to GHCR with SBOM and provenance; `vX.Y.Z` tags also
+  build the distributions, attach them to a GitHub Release and, when the
+  repository variable `PUBLISH_TO_PYPI` is `true`, publish to PyPI with trusted
+  publishing.
+
+See [CHANGELOG.md](CHANGELOG.md) and [SECURITY.md](SECURITY.md).
 
 ## License
 
