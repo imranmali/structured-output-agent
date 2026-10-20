@@ -21,8 +21,16 @@ from .errors import (
     UnknownToolError,
 )
 from .hooks import HookDispatcher, RunHooks
-from .llm import AnthropicClient, AsyncLLMClient, AsyncScriptedLLM, LLMClient, ScriptedLLM
+from .llm import (
+    AnthropicClient,
+    AsyncAnthropicClient,
+    AsyncLLMClient,
+    AsyncScriptedLLM,
+    LLMClient,
+    ScriptedLLM,
+)
 from .parsing import errors_from_pydantic, extract_json, parse_output
+from .resilience import AsyncRetryingLLM, ProviderRetryPolicy, RetryingLLM
 from .retry import RetryPolicy, build_repair_message
 from .schema import OutputContract
 from .tools import Tool, ToolRegistry, ToolResult
@@ -47,7 +55,9 @@ __version__ = "0.2.0"
 __all__ = [
     "LOGGER_NAME",
     "AnthropicClient",
+    "AsyncAnthropicClient",
     "AsyncLLMClient",
+    "AsyncRetryingLLM",
     "AsyncScriptedLLM",
     "AsyncStructuredOutputAgent",
     "Attempt",
@@ -62,9 +72,11 @@ __all__ = [
     "OutputContract",
     "OutputError",
     "ParseError",
+    "ProviderRetryPolicy",
     "ReliabilityStats",
     "RetryExhaustedError",
     "RetryPolicy",
+    "RetryingLLM",
     "RunHooks",
     "RunResult",
     "RunTimeoutError",
