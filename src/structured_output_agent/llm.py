@@ -1,19 +1,21 @@
 """LLM client interface and implementations.
 
-``LLMClient`` is the only thing the agent needs from a provider. Two clients
-ship with the library:
+``LLMClient`` (sync) and ``AsyncLLMClient`` (async) are the only things the
+agents need from a provider. Clients shipped with the library:
 
-* ``ScriptedLLM`` plays back canned responses. It is deterministic, needs no
-  network, and records every request, which makes it ideal for tests and demos.
+* ``ScriptedLLM`` / ``AsyncScriptedLLM`` play back canned responses. They are
+  deterministic, need no network, and record every request, which makes them
+  ideal for tests, demos and load tests.
 * ``AnthropicClient`` calls Claude through the official ``anthropic`` SDK
   (install the ``anthropic`` extra).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 from .errors import LLMError
@@ -35,7 +37,22 @@ class LLMClient(Protocol):
     ) -> LLMResponse: ...
 
 
-ScriptStep = str | LLMResponse | Callable[[str, Sequence[Message]], str | LLMResponse]
+@runtime_checkable
+class AsyncLLMClient(Protocol):
+    """Async counterpart of ``LLMClient``."""
+
+    async def complete(
+        self,
+        *,
+        system: str,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] = (),
+    ) -> LLMResponse: ...
+
+
+ScriptStep = (
+    str | LLMResponse | BaseException | Callable[[str, Sequence[Message]], str | LLMResponse]
+)
 
 
 @dataclass
@@ -47,23 +64,40 @@ class RecordedCall:
     tools: list[ToolSpec]
 
 
-@dataclass
-class ScriptedLLM:
-    """Deterministic client that returns scripted responses in order.
-
-    Each step is a string (answer text), an ``LLMResponse`` (for tool calls),
-    or a callable receiving ``(system, messages)`` and returning either.
-    """
-
-    script: Iterable[ScriptStep]
-    calls: list[RecordedCall] = field(default_factory=list, init=False)
-
-    def __post_init__(self) -> None:
-        self._steps = list(self.script)
+class _Script:
+    def __init__(self, script: Iterable[ScriptStep]) -> None:
+        self.script = script
+        self.calls: list[RecordedCall] = []
+        self._steps = list(script)
 
     @property
     def remaining(self) -> int:
         return len(self._steps)
+
+    def _next(
+        self, system: str, messages: Sequence[Message], tools: Sequence[ToolSpec]
+    ) -> LLMResponse:
+        self.calls.append(RecordedCall(system=system, messages=list(messages), tools=list(tools)))
+        if not self._steps:
+            raise LLMError(f"{type(self).__name__} exhausted after {len(self.calls) - 1} responses")
+        step = self._steps.pop(0)
+        if isinstance(step, BaseException):
+            raise step
+        if callable(step):
+            step = step(system, messages)
+        if isinstance(step, str):
+            return LLMResponse(text=step)
+        return step
+
+
+class ScriptedLLM(_Script):
+    """Deterministic client that returns scripted responses in order.
+
+    Each step is a string (answer text), an ``LLMResponse`` (for tool calls or
+    usage), an exception instance (raised, to simulate provider failures), or a
+    callable receiving ``(system, messages)`` and returning a string or
+    ``LLMResponse``.
+    """
 
     def complete(
         self,
@@ -72,15 +106,26 @@ class ScriptedLLM:
         messages: Sequence[Message],
         tools: Sequence[ToolSpec] = (),
     ) -> LLMResponse:
-        self.calls.append(RecordedCall(system=system, messages=list(messages), tools=list(tools)))
-        if not self._steps:
-            raise LLMError(f"ScriptedLLM exhausted after {len(self.calls) - 1} responses")
-        step = self._steps.pop(0)
-        if callable(step):
-            step = step(system, messages)
-        if isinstance(step, str):
-            return LLMResponse(text=step)
-        return step
+        return self._next(system, messages, tools)
+
+
+class AsyncScriptedLLM(_Script):
+    """Async ``ScriptedLLM``; ``delay`` seconds simulate model latency."""
+
+    def __init__(self, script: Iterable[ScriptStep], *, delay: float = 0.0) -> None:
+        super().__init__(script)
+        self.delay = delay
+
+    async def complete(
+        self,
+        *,
+        system: str,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] = (),
+    ) -> LLMResponse:
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        return self._next(system, messages, tools)
 
 
 class AnthropicClient:

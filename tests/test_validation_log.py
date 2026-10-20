@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from structured_output_agent.types import ErrorDetail, FailureKind
+from structured_output_agent.types import ErrorDetail, FailureKind, Usage
 from structured_output_agent.validation_log import (
     LOGGER_NAME,
     FailureEvent,
@@ -193,7 +193,7 @@ def test_exhausted_run_logged_at_error(caplog: pytest.LogCaptureFixture) -> None
     log.record_run(contract="Person", success=False, attempts=3, run_id="abc")
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
-    assert "retries exhausted" in errors[0].getMessage()
+    assert "run failed" in errors[0].getMessage()
     assert "Person" in errors[0].getMessage()
     assert errors[0].run_outcome["run_id"] == "abc"  # type: ignore[attr-defined]
     stats = log.stats
@@ -232,6 +232,10 @@ def test_empty_stats_rates_are_zero() -> None:
         "failures_by_kind": {},
         "success_rate": 0.0,
         "first_attempt_success_rate": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_duration_s": 0.0,
+        "mean_duration_s": 0.0,
     }
 
 
@@ -279,3 +283,15 @@ def test_failure_event_direct_construction() -> None:
     )
     assert event.run_id is None
     assert event.to_dict()["kind"] == "tool_execution_error"
+
+
+def test_usage_and_duration_totals() -> None:
+    logger = ValidationLogger()
+    logger.record_run(contract="P", success=True, attempts=1, usage=Usage(100, 10), duration_s=1.0)
+    logger.record_run(contract="P", success=True, attempts=1, usage=Usage(50, 5), duration_s=3.0)
+    stats = logger.stats
+    assert stats.input_tokens == 150
+    assert stats.output_tokens == 15
+    assert stats.total_duration_s == 4.0
+    assert stats.mean_duration_s == 2.0
+    assert stats.to_dict()["mean_duration_s"] == 2.0

@@ -10,11 +10,10 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sys
 from collections.abc import Sequence
-from typing import Any, TextIO
+from typing import TextIO
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +21,7 @@ from . import __version__
 from .agent import StructuredOutputAgent
 from .errors import StructuredOutputError
 from .llm import DEFAULT_ANTHROPIC_MODEL, AnthropicClient, LLMClient, ScriptedLLM
+from .loading import load_model
 from .retry import RetryPolicy
 from .schema import OutputContract
 from .tools import ToolRegistry
@@ -118,19 +118,6 @@ def cmd_demo(args: argparse.Namespace, out: TextIO) -> int:
     if args.log_file:
         out.write(f"\nFailure events written to {args.log_file}\n")
     return 0
-
-
-def load_model(spec: str) -> type[BaseModel]:
-    """Import ``package.module:ClassName`` and check it is a Pydantic model."""
-    module_name, sep, attr = spec.partition(":")
-    if not sep or not module_name or not attr:
-        raise ValueError(f"Expected 'module:ClassName', got {spec!r}")
-    obj: Any = importlib.import_module(module_name)
-    for part in attr.split("."):
-        obj = getattr(obj, part)
-    if not (isinstance(obj, type) and issubclass(obj, BaseModel)):
-        raise TypeError(f"{spec} is not a Pydantic model class")
-    return obj
 
 
 def cmd_schema(args: argparse.Namespace, out: TextIO) -> int:

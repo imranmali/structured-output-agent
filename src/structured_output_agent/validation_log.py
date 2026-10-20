@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .types import ErrorDetail, FailureKind
+from .types import ErrorDetail, FailureKind, Usage
 
 LOGGER_NAME = "structured_output_agent"
 
@@ -64,6 +64,13 @@ class ReliabilityStats:
     attempts: int = 0
     first_attempt_successes: int = 0
     failures_by_kind: dict[str, int] = field(default_factory=dict)
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_duration_s: float = 0.0
+
+    @property
+    def mean_duration_s(self) -> float:
+        return self.total_duration_s / self.runs if self.runs else 0.0
 
     @property
     def success_rate(self) -> float:
@@ -83,6 +90,10 @@ class ReliabilityStats:
             "failures_by_kind": dict(self.failures_by_kind),
             "success_rate": self.success_rate,
             "first_attempt_success_rate": self.first_attempt_success_rate,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_duration_s": self.total_duration_s,
+            "mean_duration_s": self.mean_duration_s,
         }
 
 
@@ -128,6 +139,9 @@ class ValidationLogger:
                 attempts=s.attempts,
                 first_attempt_successes=s.first_attempt_successes,
                 failures_by_kind=dict(s.failures_by_kind),
+                input_tokens=s.input_tokens,
+                output_tokens=s.output_tokens,
+                total_duration_s=s.total_duration_s,
             )
 
     def record(
@@ -182,12 +196,19 @@ class ValidationLogger:
         success: bool,
         attempts: int,
         run_id: str | None = None,
+        usage: Usage | None = None,
+        duration_s: float | None = None,
     ) -> None:
         """Record the outcome of a whole run of ``attempts`` generation attempts."""
         with self._lock:
             s = self._stats
             s.runs += 1
             s.attempts += attempts
+            if usage is not None:
+                s.input_tokens += usage.input_tokens
+                s.output_tokens += usage.output_tokens
+            if duration_s is not None:
+                s.total_duration_s += duration_s
             if success:
                 s.successes += 1
                 if attempts == 1:
@@ -196,7 +217,7 @@ class ValidationLogger:
                 s.failures += 1
         if not success:
             self.logger.error(
-                "retries exhausted for %s after %d attempts",
+                "run failed for %s after %d attempts",
                 contract,
                 attempts,
                 extra={

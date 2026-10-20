@@ -132,3 +132,23 @@ def test_anthropic_client_without_fallbacks_uses_stable_endpoint() -> None:
     assert "tools" not in sent
     assert "betas" not in sent
     assert "output_config" not in sent
+
+
+async def test_async_scripted_llm_plays_back_and_raises_exception_steps() -> None:
+    from structured_output_agent import AsyncLLMClient, AsyncScriptedLLM, TransientLLMError
+
+    llm = AsyncScriptedLLM([TransientLLMError("busy", retry_after=1.5), "ok"], delay=0.001)
+    assert isinstance(llm, AsyncLLMClient)
+    with pytest.raises(TransientLLMError) as info:
+        await llm.complete(system="s", messages=[])
+    assert info.value.retryable is True
+    assert info.value.retry_after == 1.5
+    assert (await llm.complete(system="s", messages=[])).text == "ok"
+    assert len(llm.calls) == 2
+
+
+def test_llm_error_defaults_to_permanent() -> None:
+    err = LLMError("bad request", status_code=400)
+    assert err.retryable is False
+    assert err.status_code == 400
+    assert LLMError("x", retryable=True).retryable is True
