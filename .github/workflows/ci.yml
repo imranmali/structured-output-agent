@@ -162,6 +162,9 @@ jobs:
     name: Docker image
     needs: [lint, test]
     runs-on: ubuntu-latest
+    env:
+      IMAGE: structured-output-agent:ci
+      CONTAINER: soa-smoke
     steps:
       - uses: actions/checkout@v7
 
@@ -173,11 +176,61 @@ jobs:
           context: .
           load: true
           push: false
-          tags: structured-output-agent:ci
+          tags: ${{ env.IMAGE }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test the image
+      - name: Smoke test the CLI
         run: |
-          docker run --rm structured-output-agent:ci --help
-          docker run --rm structured-output-agent:ci demo
+          docker run --rm "$IMAGE" --help
+          docker run --rm "$IMAGE" demo
+
+      # The default command serves HTTP on 0.0.0.0:8000. No ANTHROPIC_API_KEY
+      # is set: probes, model listing and metrics must work without one.
+      - name: Start the HTTP service
+        run: >-
+          docker run --detach --name "$CONTAINER"
+          --env SOA_MODELS=structured_output_agent.cli:WeatherReport
+          --publish 8000:8000
+          "$IMAGE"
+
+      - name: Smoke test the HTTP service
+        run: |
+          base=http://localhost:8000
+          for _ in $(seq 1 30); do
+            if curl -fsS "$base/healthz"; then
+              echo
+              break
+            fi
+            sleep 1
+          done
+          curl -fsS "$base/healthz"
+          echo
+          curl -fsS "$base/readyz"
+          echo
+          curl -fsS "$base/v1/models" | tee "$RUNNER_TEMP/models.json"
+          echo
+          grep -q WeatherReport "$RUNNER_TEMP/models.json"
+          curl -fsS "$base/metrics" > "$RUNNER_TEMP/metrics.txt"
+          head -n 20 "$RUNNER_TEMP/metrics.txt"
+
+      - name: Show service logs
+        if: failure()
+        run: docker logs "$CONTAINER" || true
+
+      - name: Stop the HTTP service
+        if: always()
+        run: docker rm --force "$CONTAINER" || true
+
+      # Fails on critical OS or library CVEs that have a fix available.
+      # Pinned to a commit: this action's tags have been rewritten before.
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          format: table
+          scanners: vuln
+          vuln-type: os,library
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
