@@ -8,6 +8,7 @@ from .errors import (
     OutputError,
     ParseError,
     RetryExhaustedError,
+    RunTimeoutError,
     SchemaValidationError,
     StructuredOutputError,
     ToolArgumentError,
@@ -16,9 +17,11 @@ from .errors import (
     ToolRegistrationError,
     ToolResponseError,
     ToolRoundLimitError,
+    TransientLLMError,
     UnknownToolError,
 )
-from .llm import AnthropicClient, LLMClient, ScriptedLLM
+from .hooks import HookDispatcher, RunHooks
+from .llm import AnthropicClient, AsyncLLMClient, AsyncScriptedLLM, LLMClient, ScriptedLLM
 from .parsing import errors_from_pydantic, extract_json, parse_output
 from .retry import RetryPolicy, build_repair_message
 from .schema import OutputContract
@@ -32,21 +35,25 @@ from .types import (
     RunResult,
     ToolCall,
     ToolSpec,
+    Usage,
 )
 from .validation_log import LOGGER_NAME, FailureEvent, ReliabilityStats, ValidationLogger
 
 # Library etiquette: stay silent unless the application configures logging.
 logging.getLogger(LOGGER_NAME).addHandler(logging.NullHandler())
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "LOGGER_NAME",
     "AnthropicClient",
+    "AsyncLLMClient",
+    "AsyncScriptedLLM",
     "Attempt",
     "ErrorDetail",
     "FailureEvent",
     "FailureKind",
+    "HookDispatcher",
     "LLMClient",
     "LLMError",
     "LLMResponse",
@@ -57,7 +64,9 @@ __all__ = [
     "ReliabilityStats",
     "RetryExhaustedError",
     "RetryPolicy",
+    "RunHooks",
     "RunResult",
+    "RunTimeoutError",
     "SchemaValidationError",
     "ScriptedLLM",
     "StructuredOutputAgent",
@@ -73,7 +82,9 @@ __all__ = [
     "ToolResult",
     "ToolRoundLimitError",
     "ToolSpec",
+    "TransientLLMError",
     "UnknownToolError",
+    "Usage",
     "ValidationLogger",
     "__version__",
     "build_repair_message",

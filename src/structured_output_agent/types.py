@@ -24,6 +24,7 @@ class FailureKind(str, Enum):
     TOOL_ARGUMENT_ERROR = "tool_argument_error"
     TOOL_EXECUTION_ERROR = "tool_execution_error"
     TOOL_RESPONSE_ERROR = "tool_response_error"
+    PROVIDER_ERROR = "provider_error"
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,31 @@ class Message:
     raw: Any = None
 
 
+@dataclass(frozen=True)
+class Usage:
+    """Token counts reported by the provider for one or more model calls."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+    def __add__(self, other: Usage) -> Usage:
+        return Usage(
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+        )
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
 @dataclass
 class LLMResponse:
     """What an LLM client returns: candidate answer text and/or tool calls."""
@@ -89,6 +115,7 @@ class LLMResponse:
     text: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     raw: Any = None
+    usage: Usage = field(default_factory=Usage)
 
 
 @dataclass
@@ -110,3 +137,6 @@ class RunResult(Generic[T]):
     failures: list[Attempt] = field(default_factory=list)
     tool_calls: int = 0
     messages: list[Message] = field(default_factory=list)
+    run_id: str = ""
+    usage: Usage = field(default_factory=Usage)
+    duration_s: float = 0.0
