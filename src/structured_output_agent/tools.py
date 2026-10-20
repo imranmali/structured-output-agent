@@ -10,9 +10,12 @@ content can be sent to the model so it can recover.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import functools
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar, get_type_hints, overload
 
@@ -48,6 +51,11 @@ class Tool:
     func: Callable[..., Any]
     args_model: type[BaseModel]
     response_model: type[BaseModel] | None = None
+    timeout: float | None = None
+
+    @property
+    def is_async(self) -> bool:
+        return inspect.iscoroutinefunction(self.func)
 
     @classmethod
     def from_function(
@@ -58,6 +66,7 @@ class Tool:
         description: str | None = None,
         args_model: type[BaseModel] | None = None,
         response_model: type[BaseModel] | None = None,
+        timeout: float | None = None,
     ) -> Tool:
         """Build a tool, deriving missing pieces from the function.
 
@@ -66,6 +75,8 @@ class Tool:
         signature, and the response model to the return annotation when it is
         a Pydantic model.
         """
+        if timeout is not None and timeout <= 0:
+            raise ToolRegistrationError(f"Tool timeout must be > 0, got {timeout}")
         tool_name = name or getattr(func, "__name__", None)
         if not tool_name:
             raise ToolRegistrationError("Tool name is required for callables without __name__")
@@ -85,6 +96,7 @@ class Tool:
             func=func,
             args_model=args_model,
             response_model=response_model,
+            timeout=timeout,
         )
 
     def spec(self) -> ToolSpec:
@@ -130,6 +142,7 @@ class ToolRegistry:
         description: str | None = ...,
         args_model: type[BaseModel] | None = ...,
         response_model: type[BaseModel] | None = ...,
+        timeout: float | None = ...,
     ) -> F: ...
 
     @overload
@@ -142,6 +155,7 @@ class ToolRegistry:
         description: str | None = ...,
         args_model: type[BaseModel] | None = ...,
         response_model: type[BaseModel] | None = ...,
+        timeout: float | None = ...,
     ) -> Callable[[F], F]: ...
 
     def register(
@@ -153,6 +167,7 @@ class ToolRegistry:
         description: str | None = None,
         args_model: type[BaseModel] | None = None,
         response_model: type[BaseModel] | None = None,
+        timeout: float | None = None,
     ) -> F | Callable[[F], F]:
         """Register a function as a tool; usable bare, with options, or directly.
 
@@ -168,6 +183,7 @@ class ToolRegistry:
                     description=description,
                     args_model=args_model,
                     response_model=response_model,
+                    timeout=timeout,
                 )
             )
             return fn
@@ -199,7 +215,46 @@ class ToolRegistry:
         return name in self._tools
 
     def execute(self, call: ToolCall) -> ToolResult:
-        """Run a tool call, returning an error result instead of raising."""
+        """Run a tool call, returning an error result instead of raising.
+
+        Coroutine tools are run to completion with ``asyncio.run``. A tool with
+        a ``timeout`` runs in a worker thread; on timeout the call fails fast
+        but the thread finishes in the background.
+        """
+        prepared = self._prepare(call)
+        if isinstance(prepared, ToolResult):
+            return prepared
+        tool, kwargs = prepared
+        try:
+            if tool.is_async:
+                returned = asyncio.run(_await_with_timeout(tool, tool.func(**kwargs)))
+            elif tool.timeout is not None:
+                future = _executor().submit(tool.func, **kwargs)
+                returned = future.result(timeout=tool.timeout)
+            else:
+                returned = tool.func(**kwargs)
+        except Exception as exc:
+            return _failure(call, _execution_error(tool, exc))
+        return _finish(call, tool, returned)
+
+    async def execute_async(self, call: ToolCall) -> ToolResult:
+        """Async ``execute``: coroutine tools are awaited, sync tools run in a thread."""
+        prepared = self._prepare(call)
+        if isinstance(prepared, ToolResult):
+            return prepared
+        tool, kwargs = prepared
+        try:
+            if tool.is_async:
+                returned = await _await_with_timeout(tool, tool.func(**kwargs))
+            else:
+                returned = await _await_with_timeout(
+                    tool, asyncio.to_thread(functools.partial(tool.func, **kwargs))
+                )
+        except Exception as exc:
+            return _failure(call, _execution_error(tool, exc))
+        return _finish(call, tool, returned)
+
+    def _prepare(self, call: ToolCall) -> tuple[Tool, dict[str, Any]] | ToolResult:
         tool = self._tools.get(call.name)
         if tool is None:
             available = ", ".join(self.names) or "none"
@@ -210,7 +265,6 @@ class ToolRegistry:
                     tool_name=call.name,
                 ),
             )
-
         try:
             validated = tool.args_model.model_validate(call.arguments)
         except ValidationError as exc:
@@ -223,27 +277,46 @@ class ToolRegistry:
                     errors=errors,
                 ),
             )
+        return tool, {attr: getattr(validated, attr) for attr in tool.args_model.model_fields}
 
-        kwargs = {attr: getattr(validated, attr) for attr in tool.args_model.model_fields}
-        try:
-            returned = tool.func(**kwargs)
-        except Exception as exc:
-            return _failure(
-                call, ToolExecutionError(f"{type(exc).__name__}: {exc}", tool_name=tool.name)
-            )
 
-        try:
-            value, content = _serialise_response(tool, returned)
-        except ToolResponseError as exc:
-            return _failure(call, exc)
-        return ToolResult(
-            call_id=call.id,
-            name=call.name,
-            ok=True,
-            content=content,
-            value=value,
-            arguments=call.arguments,
+_EXECUTOR: concurrent.futures.ThreadPoolExecutor | None = None
+
+
+def _executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _EXECUTOR
+    if _EXECUTOR is None:
+        _EXECUTOR = concurrent.futures.ThreadPoolExecutor(thread_name_prefix="soa-tool")
+    return _EXECUTOR
+
+
+async def _await_with_timeout(tool: Tool, awaitable: Awaitable[Any]) -> Any:
+    if tool.timeout is None:
+        return await awaitable
+    return await asyncio.wait_for(awaitable, timeout=tool.timeout)
+
+
+def _execution_error(tool: Tool, exc: Exception) -> ToolExecutionError:
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, concurrent.futures.TimeoutError)):
+        return ToolExecutionError(
+            f"Tool '{tool.name}' timed out after {tool.timeout}s", tool_name=tool.name
         )
+    return ToolExecutionError(f"{type(exc).__name__}: {exc}", tool_name=tool.name)
+
+
+def _finish(call: ToolCall, tool: Tool, returned: Any) -> ToolResult:
+    try:
+        value, content = _serialise_response(tool, returned)
+    except ToolResponseError as exc:
+        return _failure(call, exc)
+    return ToolResult(
+        call_id=call.id,
+        name=call.name,
+        ok=True,
+        content=content,
+        value=value,
+        arguments=call.arguments,
+    )
 
 
 def _serialise_response(tool: Tool, returned: Any) -> tuple[Any, str]:

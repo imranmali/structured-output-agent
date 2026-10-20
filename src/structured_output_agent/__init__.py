@@ -2,7 +2,7 @@
 
 import logging
 
-from .agent import StructuredOutputAgent
+from .agent import AsyncStructuredOutputAgent, StructuredOutputAgent
 from .errors import (
     LLMError,
     OutputError,
@@ -49,6 +49,7 @@ __all__ = [
     "AnthropicClient",
     "AsyncLLMClient",
     "AsyncScriptedLLM",
+    "AsyncStructuredOutputAgent",
     "Attempt",
     "ErrorDetail",
     "FailureEvent",
