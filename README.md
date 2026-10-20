@@ -3,7 +3,7 @@
 [![CI](https://github.com/imranmali/structured-output-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/imranmali/structured-output-agent/actions/workflows/ci.yml)
 [![CD](https://github.com/imranmali/structured-output-agent/actions/workflows/cd.yml/badge.svg)](https://github.com/imranmali/structured-output-agent/actions/workflows/cd.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![Python](https://img.shields.io/badge/python-3.10%E2%80%933.13-blue)
+![Python](https://img.shields.io/badge/python-3.10%E2%80%933.14-blue)
 
 **Make LLMs reliable, not random.** Structured Output Agent wraps any chat LLM so
 that every answer is a validated Pydantic object, or a precise, logged error.
@@ -15,6 +15,10 @@ that every answer is a validated Pydantic object, or a precise, logged error.
   errors, under a bounded retry policy with exponential backoff.
 - **Log validation failures**: every failure becomes a structured event (stdlib
   logging and JSON lines), with success-rate statistics.
+- **Production ready**: async agent with concurrent tool calls, bounded batches,
+  run deadlines, jittered retries for provider outages, token usage and hooks,
+  log redaction, and an HTTP service with probes, Prometheus metrics, auth and
+  load shedding that scales horizontally on Kubernetes.
 
 ```text
 prompt ──► LLM ──► extract JSON ──► validate (Pydantic) ──► typed object ✔
@@ -33,9 +37,12 @@ prompt ──► LLM ──► extract JSON ──► validate (Pydantic) ──
 pip install "structured-output-agent @ git+https://github.com/imranmali/structured-output-agent"
 # with the Claude client
 pip install "structured-output-agent[anthropic] @ git+https://github.com/imranmali/structured-output-agent"
+# with the HTTP service
+pip install "structured-output-agent[anthropic,server] @ git+https://github.com/imranmali/structured-output-agent"
 ```
 
-Requires Python 3.10+. The only runtime dependency is `pydantic>=2`.
+Requires Python 3.10+. The only runtime dependency of the library is
+`pydantic>=2`; the `anthropic` and `server` extras are optional.
 
 ## Quick start
 
@@ -157,7 +164,7 @@ from structured_output_agent import ValidationLogger
 logger = ValidationLogger(path="logs/failures.jsonl", max_raw_chars=2000)
 agent = StructuredOutputAgent(llm, logger=logger)
 ...
-logger.events  # list[FailureEvent]
+logger.events  # most recent FailureEvents (bounded, see below)
 logger.stats.to_dict()  # runs, successes, attempts, failures_by_kind, success rates
 ```
 
@@ -189,6 +196,115 @@ class MyClient:
 `AnthropicClient` defaults to `claude-opus-5-5`, replays assistant turns with
 their original content blocks, raises `LLMError` on refusals, and enables
 server-side refusal fallbacks (`fallbacks=None` turns them off).
+
+## Production use
+
+### Async runs, concurrent tools and batches
+
+`AsyncStructuredOutputAgent` has the same semantics as the sync agent (both
+are thin drivers over one `RunEngine`), but awaits the model, runs all tool
+calls of a turn concurrently and bounds whole runs with a deadline:
+
+```python
+import asyncio
+
+from structured_output_agent import AsyncScriptedLLM, AsyncStructuredOutputAgent, RunResult
+
+llm = AsyncScriptedLLM(['{"name": "Ada", "age": 36}'] * 3, delay=0.05)
+agent = AsyncStructuredOutputAgent(llm, run_timeout=30)
+
+
+async def main() -> None:
+    one = await agent.run("Ada is 36", Person)
+    many = await agent.run_many(["a", "b", "c"], Person, concurrency=8)
+    ok = [r.output for r in many if isinstance(r, RunResult)]  # failures come back in place
+    print(one.output, len(ok))
+
+
+asyncio.run(main())
+```
+
+- Coroutine tools are awaited and sync tools run in worker threads; set
+  `@tools.register(timeout=5)` to fail slow tools fast (the model gets a
+  tool error and the run continues).
+- `run_many` keeps input order and returns a failed item as its exception.
+  The sync agent has `run_many(..., max_workers=8)` on a thread pool.
+- `run_timeout` raises `RunTimeoutError`; cancelled runs are recorded as failed.
+
+### Provider resilience
+
+Rate limits, overload, 5xx, timeouts and connection errors are transient and
+retried with capped exponential backoff, full jitter and `Retry-After`;
+authentication errors, bad requests and refusals fail immediately:
+
+```python
+from structured_output_agent import (
+    AsyncAnthropicClient,
+    AsyncRetryingLLM,
+    ProviderRetryPolicy,
+)
+
+llm = AsyncRetryingLLM(
+    AsyncAnthropicClient(timeout=60, max_retries=0),  # let the wrapper own retries
+    ProviderRetryPolicy(max_retries=4, initial_delay=0.5, max_delay=20),
+)
+agent = AsyncStructuredOutputAgent(llm)
+```
+
+`RetryingLLM` wraps sync clients the same way. Any client can opt in by raising
+`TransientLLMError(retry_after=...)` for retryable failures. A provider failure
+that ends a run is logged as a `provider_error` event.
+
+### Usage, run IDs and hooks
+
+Every `RunResult` carries `run_id`, `usage` (summed input/output tokens) and
+`duration_s`; `ValidationLogger.stats` aggregates tokens and durations. Plug in
+metrics or tracing with `RunHooks`; a hook that raises is logged and ignored:
+
+```python
+from structured_output_agent import RunHooks, Usage
+
+
+class CostHook(RunHooks):
+    def on_run_end(
+        self,
+        *,
+        run_id: str,
+        contract: str,
+        success: bool,
+        attempts: int,
+        usage: Usage,
+        duration_s: float,
+        error: BaseException | None,
+    ) -> None:
+        print(f"{contract} {run_id}: {usage.total_tokens} tokens in {duration_s:.2f}s")
+
+
+agent = StructuredOutputAgent(llm_sync, hooks=[CostHook()])
+```
+
+Other notifications: `on_run_start`, `on_llm_request`, `on_llm_response`
+(latency and usage per call), `on_tool_result` and `on_failure`.
+
+### Logging safely
+
+```python
+from structured_output_agent import ValidationLogger
+from structured_output_agent.validation_log import EMAIL_PATTERN, redact_patterns
+
+logger = ValidationLogger(
+    max_events=1000,  # in-memory retention; statistics still count everything
+    redact=redact_patterns(EMAIL_PATTERN, r"\b\d{16}\b"),  # scrub before storing/logging
+)
+```
+
+Redaction is applied to raw output, error messages and offending inputs before
+an event is stored, written to JSONL or logged. If the redactor itself fails,
+the text is replaced with `[REDACTION FAILED]` rather than leaked.
+
+## HTTP service
+
+SERVICE_PLACEHOLDER
 
 ## CLI
 
