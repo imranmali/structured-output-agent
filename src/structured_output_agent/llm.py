@@ -6,20 +6,24 @@ agents need from a provider. Clients shipped with the library:
 * ``ScriptedLLM`` / ``AsyncScriptedLLM`` play back canned responses. They are
   deterministic, need no network, and record every request, which makes them
   ideal for tests, demos and load tests.
-* ``AnthropicClient`` calls Claude through the official ``anthropic`` SDK
-  (install the ``anthropic`` extra).
+* ``AnthropicClient`` / ``AsyncAnthropicClient`` call Claude through the
+  official ``anthropic`` SDK (install the ``anthropic`` extra). SDK errors are
+  mapped onto ``TransientLLMError`` / ``LLMError`` so ``RetryingLLM`` can tell
+  retryable failures from permanent ones, and token usage is reported on
+  every response.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import math
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
-from .errors import LLMError
-from .types import LLMResponse, Message, ToolCall, ToolSpec
+from .errors import LLMError, TransientLLMError
+from .types import LLMResponse, Message, ToolCall, ToolSpec, Usage
 
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
 
@@ -128,13 +132,13 @@ class AsyncScriptedLLM(_Script):
         return self._next(system, messages, tools)
 
 
-class AnthropicClient:
-    """``LLMClient`` backed by the Claude Messages API.
+_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-    Assistant turns are replayed with their original content blocks (kept on
-    ``Message.raw``) so the conversation stays append-only. Server-side refusal
-    fallbacks are enabled by default; pass ``fallbacks=None`` to disable them.
-    """
+
+class _AnthropicMessagesAPI:
+    """Request building and SDK setup shared by the sync and async clients."""
+
+    _sdk_class = "Anthropic"
 
     def __init__(
         self,
@@ -144,29 +148,21 @@ class AnthropicClient:
         effort: str | None = None,
         fallbacks: str | None = "default",
         client: Any = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
     ) -> None:
         if client is None:
-            try:
-                import anthropic
-            except ImportError as exc:  # pragma: no cover - depends on environment
-                raise LLMError(
-                    "AnthropicClient requires the 'anthropic' package: "
-                    "pip install 'structured-output-agent[anthropic]'"
-                ) from exc
-            client = anthropic.Anthropic()
+            client = _make_sdk_client(self._sdk_class, timeout=timeout, max_retries=max_retries)
         self.model = model
         self.max_tokens = max_tokens
         self.effort = effort
         self.fallbacks = fallbacks
         self._client = client
 
-    def complete(
-        self,
-        *,
-        system: str,
-        messages: Sequence[Message],
-        tools: Sequence[ToolSpec] = (),
-    ) -> LLMResponse:
+    def _prepare(
+        self, system: str, messages: Sequence[Message], tools: Sequence[ToolSpec]
+    ) -> tuple[Callable[..., Any], dict[str, Any]]:
+        """Return the SDK ``create`` method to call and its keyword arguments."""
         params: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
@@ -181,14 +177,139 @@ class AnthropicClient:
         if self.effort:
             params["output_config"] = {"effort": self.effort}
         if self.fallbacks:
-            response = self._client.beta.messages.create(
-                **params,
-                betas=["server-side-fallback-2026-07-01"],
-                extra_body={"fallbacks": self.fallbacks},
-            )
-        else:
-            response = self._client.messages.create(**params)
+            params["betas"] = [_FALLBACK_BETA]
+            params["extra_body"] = {"fallbacks": self.fallbacks}
+            return self._client.beta.messages.create, params
+        return self._client.messages.create, params
+
+
+def _make_sdk_client(class_name: str, *, timeout: float | None, max_retries: int | None) -> Any:
+    try:
+        import anthropic
+    except ImportError as exc:  # pragma: no cover - depends on environment
+        raise LLMError(
+            f"{class_name}Client requires the 'anthropic' package: "
+            "pip install 'structured-output-agent[anthropic]'"
+        ) from exc
+    kwargs: dict[str, Any] = {}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if max_retries is not None:
+        kwargs["max_retries"] = max_retries
+    return getattr(anthropic, class_name)(**kwargs)
+
+
+class AnthropicClient(_AnthropicMessagesAPI):
+    """``LLMClient`` backed by the Claude Messages API.
+
+    Assistant turns are replayed with their original content blocks (kept on
+    ``Message.raw``) so the conversation stays append-only. Server-side refusal
+    fallbacks are enabled by default; pass ``fallbacks=None`` to disable them.
+
+    ``timeout`` and ``max_retries`` configure the SDK client created when
+    ``client`` is not given (``None`` keeps the SDK defaults). Pass
+    ``max_retries=0`` when wrapping the client in ``RetryingLLM``. SDK errors
+    are raised as ``TransientLLMError`` (rate limits, overload, 5xx, timeouts,
+    connection failures) or permanent ``LLMError``; see ``map_anthropic_error``.
+    """
+
+    def complete(
+        self,
+        *,
+        system: str,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] = (),
+    ) -> LLMResponse:
+        create, params = self._prepare(system, messages, tools)
+        try:
+            response = create(**params)
+        except Exception as exc:
+            mapped = map_anthropic_error(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
         return from_anthropic_response(response)
+
+
+class AsyncAnthropicClient(_AnthropicMessagesAPI):
+    """``AsyncLLMClient`` backed by the Claude Messages API.
+
+    Same behaviour and parameters as ``AnthropicClient``, using
+    ``anthropic.AsyncAnthropic``.
+    """
+
+    _sdk_class = "AsyncAnthropic"
+
+    async def complete(
+        self,
+        *,
+        system: str,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] = (),
+    ) -> LLMResponse:
+        create, params = self._prepare(system, messages, tools)
+        try:
+            response = await create(**params)
+        except Exception as exc:
+            mapped = map_anthropic_error(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+        return from_anthropic_response(response)
+
+
+_SDK_BASE_NAMES = frozenset({"AnthropicError", "APIError"})
+_CONNECTION_ERROR_NAMES = frozenset({"APIConnectionError", "APITimeoutError"})
+_TRANSIENT_STATUSES = frozenset({408, 409, 429})
+
+
+def map_anthropic_error(exc: BaseException) -> BaseException:
+    """Translate an ``anthropic`` SDK exception into a library ``LLMError``.
+
+    Timeouts, connection failures and HTTP 408, 409, 429 and 5xx (including
+    529 overloaded) become ``TransientLLMError`` with ``retry_after`` taken
+    from the ``retry-after-ms`` / ``retry-after`` response headers; other API
+    errors become permanent ``LLMError``. Exceptions that do not come from the
+    SDK are returned unchanged. Works by duck typing, so the SDK need not be
+    importable.
+    """
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    if not names & _SDK_BASE_NAMES:
+        return exc
+    detail = f"{type(exc).__name__}: {exc}"
+    if names & _CONNECTION_ERROR_NAMES:
+        return TransientLLMError(f"Anthropic API connection failed ({detail})")
+    status = getattr(exc, "status_code", None)
+    if not isinstance(status, int):
+        status = None
+    retry_after = _parse_retry_after(exc)
+    if status is not None and (status in _TRANSIENT_STATUSES or status >= 500):
+        return TransientLLMError(
+            f"Anthropic API transient error {status} ({detail})",
+            retry_after=retry_after,
+            status_code=status,
+        )
+    label = f"error {status}" if status is not None else "error"
+    return LLMError(
+        f"Anthropic API {label} ({detail})",
+        retryable=False,
+        retry_after=retry_after,
+        status_code=status,
+    )
+
+
+def _parse_retry_after(exc: BaseException) -> float | None:
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is None:
+        return None
+    for name, scale in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
+        try:
+            seconds = float(headers.get(name)) / scale
+        except (TypeError, ValueError, AttributeError):
+            continue  # missing, HTTP-date or otherwise unparseable
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    return None
 
 
 def to_anthropic_messages(messages: Sequence[Message]) -> list[dict[str, Any]]:
@@ -233,7 +354,10 @@ def _is_tool_result_turn(turn: dict[str, Any]) -> bool:
 
 
 def from_anthropic_response(response: Any) -> LLMResponse:
-    """Convert a Messages API response into an ``LLMResponse``."""
+    """Convert a Messages API response into an ``LLMResponse``.
+
+    A refusal (``stop_reason == "refusal"``) raises a permanent ``LLMError``.
+    """
     if getattr(response, "stop_reason", None) == "refusal":
         details = getattr(response, "stop_details", None)
         category = getattr(details, "category", None) if details is not None else None
@@ -249,4 +373,19 @@ def from_anthropic_response(response: Any) -> LLMResponse:
             if isinstance(args, str):
                 args = json.loads(args)
             calls.append(ToolCall(id=block.id, name=block.name, arguments=dict(args)))
-    return LLMResponse(text="".join(texts), tool_calls=calls, raw=response.content)
+    return LLMResponse(
+        text="".join(texts), tool_calls=calls, raw=response.content, usage=_usage(response)
+    )
+
+
+def _usage(response: Any) -> Usage:
+    """Token counts from ``response.usage``; zeros when the provider omits them."""
+    usage = getattr(response, "usage", None)
+    return Usage(
+        input_tokens=_count(getattr(usage, "input_tokens", None)),
+        output_tokens=_count(getattr(usage, "output_tokens", None)),
+    )
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
