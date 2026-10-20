@@ -353,3 +353,79 @@ def test_callable_without_name_requires_explicit_name(registry: ToolRegistry) ->
 
     with pytest.raises(ToolRegistrationError, match="name is required"):
         registry.register(Greeter(), args_model=BaseModel, response_model=Weather)
+
+
+async def test_execute_async_runs_sync_and_async_tools() -> None:
+    import asyncio
+
+    registry = ToolRegistry()
+
+    @registry.register
+    async def double(x: int) -> dict[str, int]:
+        """Async tool."""
+        await asyncio.sleep(0)
+        return {"y": x * 2}
+
+    @registry.register
+    def triple(x: int) -> dict[str, int]:
+        """Sync tool."""
+        return {"y": x * 3}
+
+    @registry.register
+    async def explode() -> None:
+        """Raises."""
+        raise ValueError("nope")
+
+    assert registry.get("double").is_async  # type: ignore[union-attr]
+    ok = await registry.execute_async(ToolCall(id="1", name="double", arguments={"x": 2}))
+    assert ok.ok
+    assert json.loads(ok.content) == {"y": 4}
+    sync_ok = await registry.execute_async(ToolCall(id="2", name="triple", arguments={"x": 2}))
+    assert json.loads(sync_ok.content) == {"y": 6}
+    bad_args = await registry.execute_async(ToolCall(id="3", name="triple", arguments={}))
+    assert isinstance(bad_args.error, ToolArgumentError)
+    failed = await registry.execute_async(ToolCall(id="4", name="explode", arguments={}))
+    assert isinstance(failed.error, ToolExecutionError)
+    assert "ValueError: nope" in str(failed.error)
+
+
+def test_sync_execute_runs_coroutine_tools_and_enforces_timeouts() -> None:
+    import asyncio
+    import time
+
+    registry = ToolRegistry()
+
+    @registry.register
+    async def answer() -> dict[str, int]:
+        """Async tool run from sync code."""
+        return {"v": 42}
+
+    @registry.register(timeout=0.05)
+    def slow() -> dict[str, int]:
+        """Blocks past its timeout."""
+        time.sleep(0.5)
+        return {"v": 1}
+
+    @registry.register(timeout=0.05)
+    async def slow_async() -> dict[str, int]:
+        """Awaits past its timeout."""
+        await asyncio.sleep(0.5)
+        return {"v": 1}
+
+    @registry.register(timeout=1)
+    def quick() -> dict[str, int]:
+        """Within its timeout."""
+        return {"v": 2}
+
+    assert json.loads(registry.execute(ToolCall("1", "answer", {})).content) == {"v": 42}
+    timed_out = registry.execute(ToolCall("2", "slow", {}))
+    assert isinstance(timed_out.error, ToolExecutionError)
+    assert "timed out after 0.05s" in str(timed_out.error)
+    assert "timed out" in str(registry.execute(ToolCall("3", "slow_async", {})).error)
+    assert registry.execute(ToolCall("4", "quick", {})).ok
+
+
+def test_invalid_tool_timeout_rejected() -> None:
+    registry = ToolRegistry()
+    with pytest.raises(ToolRegistrationError, match="timeout"):
+        registry.register(lambda: None, name="bad", timeout=0)

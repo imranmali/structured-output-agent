@@ -1,16 +1,20 @@
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
-from structured_output_agent.types import ErrorDetail, FailureKind
+from structured_output_agent.types import ErrorDetail, FailureKind, Usage
 from structured_output_agent.validation_log import (
+    EMAIL_PATTERN,
     LOGGER_NAME,
+    REDACTION_FAILED,
     FailureEvent,
     ReliabilityStats,
     ValidationLogger,
+    redact_patterns,
 )
 
 AGE_MISSING = ErrorDetail(loc="age", msg="Field required", type="missing", input={"name": "Ada"})
@@ -26,7 +30,7 @@ def test_validation_failure_recorded() -> None:
         raw='{"name": "Ada"}',
         run_id="r1",
     )
-    assert log.events == [event]
+    assert list(log.events) == [event]
     assert event.kind is FailureKind.VALIDATION_ERROR
     assert event.contract == "Person"
     assert event.attempt == 2
@@ -193,7 +197,7 @@ def test_exhausted_run_logged_at_error(caplog: pytest.LogCaptureFixture) -> None
     log.record_run(contract="Person", success=False, attempts=3, run_id="abc")
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
-    assert "retries exhausted" in errors[0].getMessage()
+    assert "run failed" in errors[0].getMessage()
     assert "Person" in errors[0].getMessage()
     assert errors[0].run_outcome["run_id"] == "abc"  # type: ignore[attr-defined]
     stats = log.stats
@@ -232,6 +236,10 @@ def test_empty_stats_rates_are_zero() -> None:
         "failures_by_kind": {},
         "success_rate": 0.0,
         "first_attempt_success_rate": 0.0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_duration_s": 0.0,
+        "mean_duration_s": 0.0,
     }
 
 
@@ -256,7 +264,7 @@ def test_clear_resets_events_and_stats() -> None:
     log.record(FailureKind.PARSE_ERROR, contract="c", attempt=1, errors=[])
     log.record_run(contract="c", success=True, attempts=2)
     log.clear()
-    assert log.events == []
+    assert list(log.events) == []
     assert log.stats == ReliabilityStats()
 
 
@@ -279,3 +287,206 @@ def test_failure_event_direct_construction() -> None:
     )
     assert event.run_id is None
     assert event.to_dict()["kind"] == "tool_execution_error"
+
+
+def test_usage_and_duration_totals() -> None:
+    logger = ValidationLogger()
+    logger.record_run(contract="P", success=True, attempts=1, usage=Usage(100, 10), duration_s=1.0)
+    logger.record_run(contract="P", success=True, attempts=1, usage=Usage(50, 5), duration_s=3.0)
+    stats = logger.stats
+    assert stats.input_tokens == 150
+    assert stats.output_tokens == 15
+    assert stats.total_duration_s == 4.0
+    assert stats.mean_duration_s == 2.0
+    assert stats.to_dict()["mean_duration_s"] == 2.0
+
+
+def _fail(log: ValidationLogger, n: int) -> FailureEvent:
+    return log.record(FailureKind.PARSE_ERROR, contract="c", attempt=n, errors=[], raw=str(n))
+
+
+def test_retention_limit_keeps_most_recent() -> None:
+    log = ValidationLogger(max_events=2)
+    for n in (1, 2, 3):
+        _fail(log, n)
+    assert len(log.events) == 2
+    assert [e.attempt for e in log.events] == [2, 3]
+    assert log.events[0].attempt == 2
+    assert log.events[-1].raw == "3"
+    assert log.stats.failures_by_kind == {"parse_error": 3}
+
+
+def test_default_retention_limit() -> None:
+    log = ValidationLogger()
+    assert log.max_events == 1000
+    assert log.events.maxlen == 1000
+
+
+def test_unbounded_retention() -> None:
+    log = ValidationLogger(max_events=None)
+    for n in range(1500):
+        _fail(log, n)
+    assert log.events.maxlen is None
+    assert len(log.events) == 1500
+    assert log.stats.failures_by_kind == {"parse_error": 1500}
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_invalid_max_events_rejected(bad: int) -> None:
+    with pytest.raises(ValueError, match="max_events"):
+        ValidationLogger(max_events=bad)
+
+
+def test_clear_keeps_retention_bound() -> None:
+    log = ValidationLogger(max_events=2)
+    for n in (1, 2, 3):
+        _fail(log, n)
+    log.clear()
+    assert len(log.events) == 0
+    assert log.events.maxlen == 2
+    for n in (4, 5, 6):
+        _fail(log, n)
+    assert [e.attempt for e in log.events] == [5, 6]
+
+
+def test_email_redacted_everywhere(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger=LOGGER_NAME)
+    path = tmp_path / "failures.jsonl"
+    log = ValidationLogger(path=path, redact=redact_patterns(EMAIL_PATTERN))
+    error = ErrorDetail(
+        loc="email",
+        msg="ada@example.com is not allowed",
+        type="value_error",
+        input="ada@example.com",
+    )
+    event = log.record(
+        FailureKind.VALIDATION_ERROR,
+        contract="Person",
+        attempt=1,
+        errors=[error],
+        raw='{"email": "ada@example.com"}',
+    )
+    assert event.raw == '{"email": "[REDACTED]"}'
+    assert event.errors == [
+        ErrorDetail(
+            loc="email", msg="[REDACTED] is not allowed", type="value_error", input="[REDACTED]"
+        )
+    ]
+    assert log.events[0] is event
+    text = path.read_text(encoding="utf-8")
+    assert "[REDACTED]" in text
+    assert "ada@example.com" not in text
+    assert len(caplog.records) == 1
+    record = caplog.records[0]
+    assert "[REDACTED]" in record.getMessage()
+    assert "ada@example.com" not in record.getMessage()
+    payload = json.dumps(record.failure_event)  # type: ignore[attr-defined]
+    assert "[REDACTED]" in payload
+    assert "ada@example.com" not in payload
+    # the caller's error object is untouched
+    assert error.input == "ada@example.com"
+
+
+def test_redaction_of_nested_inputs() -> None:
+    log = ValidationLogger(redact=lambda text: text.replace("secret", "***"))
+    nested = {
+        "name": "secret",
+        "tags": ["a", "secret", 3],
+        "pair": ("secret", None),
+        "inner": {"deep": ["x-secret"], "n": 1.5, "flag": True},
+    }
+    event = log.record(
+        FailureKind.VALIDATION_ERROR,
+        contract="c",
+        attempt=1,
+        errors=[ErrorDetail(loc="$", msg="bad secret", type="x", input=nested)],
+    )
+    assert event.errors[0].msg == "bad ***"
+    assert event.errors[0].input == {
+        "name": "***",
+        "tags": ["a", "***", 3],
+        "pair": ("***", None),
+        "inner": {"deep": ["x-***"], "n": 1.5, "flag": True},
+    }
+    assert nested["name"] == "secret"
+
+
+def test_non_string_input_untouched_by_redaction() -> None:
+    calls: list[str] = []
+
+    def redact(text: str) -> str:
+        calls.append(text)
+        return text
+
+    log = ValidationLogger(redact=redact)
+    event = log.record(
+        FailureKind.VALIDATION_ERROR,
+        contract="c",
+        attempt=1,
+        errors=[ErrorDetail(loc="n", msg="m", type="x", input=42)],
+    )
+    assert event.errors[0].input == 42
+    assert calls == ["", "m"]
+
+
+def test_truncation_applied_after_redaction() -> None:
+    log = ValidationLogger(max_raw_chars=10, redact=redact_patterns("x+", replacement="-"))
+    event = log.record(FailureKind.PARSE_ERROR, contract="c", attempt=1, errors=[], raw="x" * 50)
+    assert event.raw == "-"
+    assert event.truncated is False
+    event = log.record(
+        FailureKind.PARSE_ERROR, contract="c", attempt=1, errors=[], raw="ab" + "x" * 3 + "y" * 20
+    )
+    assert event.raw == "ab-yyyyyyy"
+    assert event.truncated is True
+
+
+def test_failing_redaction_replaces_content(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.WARNING, logger=LOGGER_NAME)
+
+    def broken(text: str) -> str:
+        raise RuntimeError(f"cannot redact {text}")
+
+    path = tmp_path / "failures.jsonl"
+    log = ValidationLogger(path=path, redact=broken)
+    event = log.record(
+        FailureKind.VALIDATION_ERROR,
+        contract="c",
+        attempt=1,
+        errors=[ErrorDetail(loc="f", msg="leak@example.com", type="x", input=["leak"])],
+        raw="leak@example.com",
+    )
+    assert event.raw == REDACTION_FAILED
+    assert event.errors[0].msg == REDACTION_FAILED
+    assert event.errors[0].input == [REDACTION_FAILED]
+    assert "leak" not in path.read_text(encoding="utf-8")
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 2
+    assert "RuntimeError" in messages[0]
+    assert all("leak" not in m for m in messages)
+    assert log.stats.failures_by_kind == {"validation_error": 1}
+
+
+def test_redaction_returning_non_string_treated_as_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.WARNING, logger=LOGGER_NAME)
+
+    def bad(text: str) -> str:
+        return None  # type: ignore[return-value]
+
+    log = ValidationLogger(redact=bad)
+    event = log.record(FailureKind.PARSE_ERROR, contract="c", attempt=1, errors=[], raw="data")
+    assert event.raw == REDACTION_FAILED
+    assert "returned NoneType" in caplog.records[0].getMessage()
+
+
+def test_redact_patterns_with_string_and_compiled_patterns() -> None:
+    redact = redact_patterns(r"\d{3}-\d{4}", re.compile("token=\\w+", re.IGNORECASE))
+    assert redact("call 555-1234, TOKEN=abc123") == "call [REDACTED], [REDACTED]"
+    custom = redact_patterns(EMAIL_PATTERN, replacement="<email>")
+    assert custom("a.b+c@mail.example.org and x@y.io") == "<email> and <email>"
+    assert custom("no address here") == "no address here"
+    assert redact_patterns()("unchanged") == "unchanged"

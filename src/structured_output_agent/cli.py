@@ -5,16 +5,16 @@ Subcommands:
 * ``demo``   - offline walkthrough with a scripted model that makes mistakes.
 * ``schema`` - print the JSON Schema the model is shown for a Pydantic model.
 * ``run``    - run a prompt against Claude and print the validated JSON.
+* ``serve``  - serve the HTTP API (needs the ``server`` extra).
 """
 
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import sys
 from collections.abc import Sequence
-from typing import Any, TextIO
+from typing import TextIO
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,7 @@ from . import __version__
 from .agent import StructuredOutputAgent
 from .errors import StructuredOutputError
 from .llm import DEFAULT_ANTHROPIC_MODEL, AnthropicClient, LLMClient, ScriptedLLM
+from .loading import load_model
 from .retry import RetryPolicy
 from .schema import OutputContract
 from .tools import ToolRegistry
@@ -120,19 +121,6 @@ def cmd_demo(args: argparse.Namespace, out: TextIO) -> int:
     return 0
 
 
-def load_model(spec: str) -> type[BaseModel]:
-    """Import ``package.module:ClassName`` and check it is a Pydantic model."""
-    module_name, sep, attr = spec.partition(":")
-    if not sep or not module_name or not attr:
-        raise ValueError(f"Expected 'module:ClassName', got {spec!r}")
-    obj: Any = importlib.import_module(module_name)
-    for part in attr.split("."):
-        obj = getattr(obj, part)
-    if not (isinstance(obj, type) and issubclass(obj, BaseModel)):
-        raise TypeError(f"{spec} is not a Pydantic model class")
-    return obj
-
-
 def cmd_schema(args: argparse.Namespace, out: TextIO) -> int:
     contract = OutputContract(load_model(args.model), strict=args.strict)
     out.write(json.dumps(contract.json_schema(), indent=2, sort_keys=True) + "\n")
@@ -150,6 +138,26 @@ def cmd_run(args: argparse.Namespace, out: TextIO, llm: LLMClient | None = None)
     )
     result = agent.run(args.prompt, model)
     out.write(result.output.model_dump_json(indent=2) + "\n")
+    return 0
+
+
+def _port(value: str) -> int:
+    port = int(value)
+    if not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError(f"port must be between 1 and 65535, got {port}")
+    return port
+
+
+def cmd_serve(args: argparse.Namespace, out: TextIO) -> int:
+    """Serve the HTTP API until stopped; configuration comes from ``SOA_*`` variables."""
+    try:
+        from .server.runner import run as run_server
+    except ImportError as exc:
+        raise ImportError(
+            "the serve command needs the 'server' extra: "
+            "pip install 'structured-output-agent[server]'"
+        ) from exc
+    run_server(host=args.host, port=args.port)
     return 0
 
 
@@ -178,6 +186,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--strict", action="store_true", help="forbid unknown fields")
     run.add_argument("--log-file", help="append failure events to this JSONL file")
     run.set_defaults(func=cmd_run)
+
+    serve = sub.add_parser(
+        "serve", help="serve the HTTP API (needs the server extra; configured by SOA_* variables)"
+    )
+    serve.add_argument("--host", default="0.0.0.0", help="interface to bind (default 0.0.0.0)")
+    serve.add_argument("--port", type=_port, default=8000, help="port to bind (default 8000)")
+    serve.set_defaults(func=cmd_serve)
     return parser
 
 

@@ -18,3 +18,11 @@ updates:
       prefix: build
       prefix-development: chore
     open-pull-requests-limit: 5
+
+  # Base image (python:*-slim) in the Dockerfile.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build

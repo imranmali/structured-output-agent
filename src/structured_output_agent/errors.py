@@ -89,5 +89,35 @@ class ToolRoundLimitError(StructuredOutputError):
     """The model kept calling tools past the configured round limit."""
 
 
+class RunTimeoutError(StructuredOutputError):
+    """A run exceeded its configured deadline."""
+
+
 class LLMError(StructuredOutputError):
-    """The LLM provider failed or declined to answer."""
+    """The LLM provider failed or declined to answer.
+
+    ``retryable`` marks failures worth retrying (rate limits, overload, server
+    errors, timeouts); ``retry_after`` is the provider's requested wait in
+    seconds, when it gave one.
+    """
+
+    default_retryable = False
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool | None = None,
+        retry_after: float | None = None,
+        status_code: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = self.default_retryable if retryable is None else retryable
+        self.retry_after = retry_after
+        self.status_code = status_code
+
+
+class TransientLLMError(LLMError):
+    """A provider failure that may succeed if retried."""
+
+    default_retryable = True

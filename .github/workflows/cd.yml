@@ -23,13 +23,19 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # Signed build-provenance attestation (Sigstore via GitHub OIDC).
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v4
+      # Emulation for the arm64 half of the multi-arch build.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -38,7 +44,7 @@ jobs:
       # metadata-action lowercases the image name, as required by the registry.
       - name: Compute image tags and labels
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -47,15 +53,30 @@ jobs:
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
 
+      # BuildKit attaches an SPDX SBOM and max-mode SLSA provenance to the
+      # image index, so consumers can inspect what went into each platform.
       - name: Build and push
-        uses: docker/build-push-action@v7
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
           push: true
+          provenance: mode=max
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Artifact attestations are free for public repositories only.
+      - name: Attest build provenance
+        if: github.event.repository.visibility == 'public'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
   release:
     name: GitHub Release
@@ -70,11 +91,21 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Verify tag matches package version
+      # The version is single-sourced from __version__ (hatch dynamic version).
+      - name: Verify tag matches package version and changelog
         run: |
-          version="$(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          version="$(python - <<'EOF'
+          import pathlib, re
+          text = pathlib.Path("src/structured_output_agent/__init__.py").read_text()
+          print(re.search(r'__version__ = "(.+?)"', text).group(1))
+          EOF
+          )"
           if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} does not match pyproject version ${version} (expected v${version})"
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match __version__ ${version} (expected v${version})"
+            exit 1
+          fi
+          if ! grep -q "^## \[${version}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${version}]' section"
             exit 1
           fi
           echo "Releasing version ${version}"
@@ -84,7 +115,37 @@ jobs:
           python -m pip install build
           python -m build
 
+      - name: Upload distributions
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes
+
+  # Opt-in: set the repository variable PUBLISH_TO_PYPI=true after configuring
+  # a trusted publisher on PyPI (workflow cd.yml, environment pypi).
+  pypi:
+    name: Publish to PyPI
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v') && vars.PUBLISH_TO_PYPI == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/structured-output-agent/
+    permissions:
+      # Trusted publishing: PyPI exchanges this OIDC token; no API token.
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1

@@ -1,6 +1,7 @@
 import argparse
 import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -81,3 +82,41 @@ def test_parser_requires_command() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args([])
     assert isinstance(build_parser(), argparse.ArgumentParser)
+
+
+def test_serve_runs_the_server_with_host_and_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    import structured_output_agent.server.runner as runner
+
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(runner, "run", lambda **kwargs: calls.append(kwargs))
+
+    assert main(["serve", "--host", "127.0.0.1", "--port", "9001"]) == 0
+    assert main(["serve"]) == 0
+    assert calls == [{"host": "127.0.0.1", "port": 9001}, {"host": "0.0.0.0", "port": 8000}]
+
+
+@pytest.mark.parametrize("port", ["0", "70000", "http"])
+def test_serve_rejects_invalid_ports(port: str) -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["serve", "--port", port])
+
+
+def test_serve_without_the_server_extra(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setitem(sys.modules, "structured_output_agent.server.runner", None)
+
+    assert main(["serve"]) == 1
+    assert "pip install 'structured-output-agent[server]'" in capsys.readouterr().err
+
+
+def test_serve_reports_invalid_configuration(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import uvicorn
+
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: None)
+    monkeypatch.setenv("SOA_MAX_IN_FLIGHT", "zero")
+
+    assert main(["serve"]) == 1
+    assert "SOA_MAX_IN_FLIGHT" in capsys.readouterr().err

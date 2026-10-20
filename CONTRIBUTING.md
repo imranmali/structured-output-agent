@@ -7,7 +7,7 @@ from an idea to a release.
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
-pip install -e '.[dev]'
+pip install -e '.[dev,server,anthropic]'          # all extras, as CI installs
 pip install pre-commit && pre-commit install   # optional, runs ruff on commit
 ```
 
@@ -102,7 +102,9 @@ CI runs `openspec validate --all --strict` on every PR.
 
 ## Local quality gate
 
-Run the same checks CI runs before pushing:
+Run the same checks CI runs before pushing, in an environment with all
+extras installed (`pip install -e '.[dev,server,anthropic]'`), so the HTTP
+service and the Anthropic client are linted, type-checked and tested too:
 
 ```bash
 ruff check .
@@ -115,25 +117,76 @@ openspec validate --all --strict
 Optional extra checks:
 
 ```bash
+# Package: build, then run the CLI from the bare wheel (no extras)
 python -m build && pip install dist/*.whl && structured-agent demo
-docker build -t structured-output-agent . && docker run --rm structured-output-agent demo
+
+# Dependency audit, as the CI `audit` job runs it
+python -m venv /tmp/audit-env
+/tmp/audit-env/bin/pip install -e '.[server,anthropic]'
+/tmp/audit-env/bin/pip freeze --exclude-editable > /tmp/requirements-audit.txt
+pip install pip-audit
+pip-audit --strict --no-deps --disable-pip -r /tmp/requirements-audit.txt
+
+# Container: the demo, then the HTTP service and its probes
+docker build -t structured-output-agent .
+docker run --rm structured-output-agent demo
+docker run --rm -d --name soa -p 8000:8000 \
+  -e SOA_MODELS=structured_output_agent.cli:WeatherReport structured-output-agent
+curl -fsS localhost:8000/healthz && curl -fsS localhost:8000/v1/models
+docker stop soa
 ```
 
 ## Pull requests
 
 - Fill in the PR template, including which OpenSpec change and tasks the PR
   covers.
-- CI (`.github/workflows/ci.yml`) must pass: lint, format, mypy, tests on
-  Python 3.10-3.13 with the coverage gate, OpenSpec validation, the package
-  build with a CLI smoke test, and the Docker image build.
+- Add an entry under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) for
+  every user-visible change (`Added`, `Changed`, `Deprecated`, `Removed`,
+  `Fixed`, `Security`), following [Keep a Changelog](https://keepachangelog.com/).
+  Internal-only changes (CI tweaks, refactors, tests) need no entry.
+- CI must pass:
+  - `.github/workflows/ci.yml`: lint, format and mypy; tests on Python
+    3.10-3.14 with the coverage gate; `pip-audit` on the runtime dependencies;
+    OpenSpec validation; the package build with a CLI smoke test; and the
+    Docker image build with CLI and HTTP service smoke tests and a Trivy scan
+    (fails on fixable critical CVEs).
+  - `.github/workflows/codeql.yml`: CodeQL for Python and for the workflows.
+- Report security problems privately as described in
+  [`SECURITY.md`](SECURITY.md), not in a PR or issue.
+
+### Recommended branch protection for `main`
+
+Configure under **Settings -> Branches** (or a ruleset) for `main`:
+
+- Require a pull request before merging (at least one approval; require
+  review from Code Owners, see `.github/CODEOWNERS`; dismiss stale approvals
+  on new commits).
+- Require status checks to pass, and require branches to be up to date
+  before merging. Required checks:
+  - `Lint, format and type-check`
+  - `Tests (Python 3.10)` through `Tests (Python 3.14)`
+  - `OpenSpec validation`
+  - `Build distributions`
+  - `Docker image`
+  - `Dependency audit`
+  - `CodeQL (python)` and `CodeQL (actions)`
+- Require conversation resolution before merging.
+- Block force pushes and deletion of `main`; do not allow bypassing the
+  rules.
 
 ## Release process
 
-Releases are cut from `main` by pushing a version tag.
+Releases are cut from `main` by pushing a version tag. Versions follow
+[Semantic Versioning](https://semver.org/).
 
-1. On a `chore/*` branch, bump the version in **both** places and merge the PR:
-   - `pyproject.toml` -> `[project] version = "X.Y.Z"`
-   - `src/structured_output_agent/__init__.py` -> `__version__ = "X.Y.Z"`
+1. On a `chore/*` branch, prepare the release and merge the PR:
+   - Bump `__version__ = "X.Y.Z"` in `src/structured_output_agent/__init__.py`.
+     It is the single source of the version: `pyproject.toml` reads it through
+     hatch's dynamic versioning, so there is nothing to change there.
+   - In `CHANGELOG.md`, rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`,
+     add a new empty `## [Unreleased]` above it, and update the link
+     references at the bottom (`[Unreleased]` compares `vX.Y.Z...HEAD`;
+     `[X.Y.Z]` compares the previous tag with `vX.Y.Z`).
 2. Tag the merge commit on `main` and push the tag:
 
    ```bash
@@ -143,15 +196,33 @@ Releases are cut from `main` by pushing a version tag.
    ```
 
 3. The CD workflow (`.github/workflows/cd.yml`) then:
-   - verifies the tag matches the version in `pyproject.toml` (the release job
-     fails otherwise),
+   - verifies the tag matches `__version__` and that `CHANGELOG.md` has a
+     `## [X.Y.Z]` section (the release job fails otherwise),
    - builds the sdist and wheel and publishes a GitHub Release with
      auto-generated notes and the distributions attached,
-   - builds and pushes the container image to
-     `ghcr.io/imranmali/structured-output-agent` tagged `X.Y.Z` and
-     `sha-<commit>`.
+   - builds and pushes the multi-arch (`linux/amd64`, `linux/arm64`)
+     container image to `ghcr.io/imranmali/structured-output-agent` tagged
+     `X.Y.Z` and `sha-<commit>`, with SBOM and provenance attestations,
+   - publishes the distributions to PyPI, if enabled (see below).
 
 Every push to `main` also publishes the image tagged `main`, `latest` and
 `sha-<commit>`.
 
-Versions follow [Semantic Versioning](https://semver.org/).
+### Publishing to PyPI (optional)
+
+PyPI publishing uses [trusted publishing](https://docs.pypi.org/trusted-publishers/),
+so no API token is stored in the repository. It is off until you enable it:
+
+1. On PyPI, add a trusted publisher for the `structured-output-agent` project
+   (use a "pending publisher" before the first upload) with owner
+   `imranmali`, repository `structured-output-agent`, workflow `cd.yml` and
+   environment `pypi`.
+2. In the GitHub repository, create the environment `pypi` under
+   **Settings -> Environments**. Optionally restrict it to `v*` tags and add
+   required reviewers so every upload is approved by hand.
+3. Set the repository variable `PUBLISH_TO_PYPI` to `true` under
+   **Settings -> Secrets and variables -> Actions -> Variables**.
+
+The `pypi` job in `cd.yml` then runs after the GitHub Release on each `v*`
+tag and uploads the same sdist and wheel. Set the variable to anything other
+than `true` (or delete it) to stop publishing.
